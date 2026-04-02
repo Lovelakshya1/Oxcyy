@@ -52,30 +52,36 @@ jobs:
           key: gradle-${{ runner.os }}-${{ hashFiles('android/**/*.gradle*', 'android/**/gradle-wrapper.properties') }}
           restore-keys: gradle-${{ runner.os }}-
 
-      # ── Fix: patch Gradle + Kotlin versions ───────────────────────────────
-      # Flutter 3.29+ uses filePermissions API (Gradle 8.3+).
-      # This fails to compile when Kotlin is 1.9.x targeting JVM 1.8.
-      # Fix: bump Gradle wrapper to 8.10.2 and Kotlin plugin to 2.0.21.
-      # This is a targeted patch — it does NOT regenerate the whole project.
-      - name: Patch Gradle & Kotlin versions
+      # ── Patch plugin versions ─────────────────────────────────────────────
+      # Flutter 3.29+ requires:
+      #   AGP  >= 8.1.1  (your committed settings.gradle has 7.4.2)
+      #   Kotlin >= 2.0  (your committed settings.gradle has 1.9.23)
+      #   Gradle >= 8.3  (your committed wrapper has 8.7 — bumping to 8.10.2)
+      #
+      # These are in-place patches on the committed files, no full regeneration.
+      - name: Patch AGP / Kotlin / Gradle versions
         run: |
-          # 1. Gradle wrapper → 8.10.2
+          # ── 1. Gradle wrapper → 8.10.2 ────────────────────────────────────
           sed -i 's|distributionUrl=.*|distributionUrl=https\\://services.gradle.org/distributions/gradle-8.10.2-all.zip|' \
             android/gradle/wrapper/gradle-wrapper.properties
 
-          # 2. Kotlin plugin in settings.gradle → 2.0.21
+          # ── 2. AGP → 8.7.3  (was 7.4.2, Flutter 3.41 needs 8.1.1+) ───────
+          sed -i 's|id "com.android.application" version "[^"]*"|id "com.android.application" version "8.7.3"|g' \
+            android/settings.gradle
+
+          # ── 3. Kotlin plugin → 2.0.21 (was 1.9.23) ────────────────────────
           sed -i 's|id "org.jetbrains.kotlin.android" version "[^"]*"|id "org.jetbrains.kotlin.android" version "2.0.21"|g' \
             android/settings.gradle
 
-          # 3. Kotlin stdlib dep in app/build.gradle(.kts) → 2.0.21
-          # Handles both Groovy and Kotlin DSL syntax
+          # ── 4. Kotlin stdlib dep (if present in build files) ──────────────
           sed -i 's|kotlin-stdlib:[^"]*"|kotlin-stdlib:2.0.21"|g' android/app/build.gradle.kts 2>/dev/null || true
-          sed -i 's|kotlin-stdlib:[^"]*"|kotlin-stdlib:2.0.21"|g' android/app/build.gradle 2>/dev/null || true
+          sed -i 's|kotlin-stdlib:[^"]*"|kotlin-stdlib:2.0.21"|g' android/app/build.gradle     2>/dev/null || true
 
-          echo "--- Patched gradle-wrapper.properties ---"
+          # ── Verify patches ────────────────────────────────────────────────
+          echo "=== gradle-wrapper.properties ==="
           cat android/gradle/wrapper/gradle-wrapper.properties
-          echo "--- Patched settings.gradle (kotlin line) ---"
-          grep kotlin android/settings.gradle
+          echo "=== settings.gradle (plugin versions) ==="
+          grep -E 'com.android.application|kotlin.android' android/settings.gradle
 
       # ── Install deps ──────────────────────────────────────────────────────
       - name: Get packages
