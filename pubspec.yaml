@@ -1,6 +1,6 @@
 name: oxcy
 description: "A new Flutter project."
-publish_to: 'none' 
+publish_to: 'none'
 version: 1.0.0+1
 
 environment:
@@ -34,12 +34,6 @@ dependencies:
   audio_service: ^0.18.18
   audio_session: ^0.2.2
   on_audio_query: ^2.9.0
-
-  # YOUTUBE (Hemant's Fork)
-  youtube_explode_dart:
-    git:
-      url: https://github.com/HemantKArya/youtube_explode_dart.git
-      ref: master
 
 dev_dependencies:
   flutter_test:
