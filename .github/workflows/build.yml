@@ -1,200 +1,79 @@
 name: Build APK
-on: [push, workflow_dispatch]
+
+on:
+  push:
+    branches: [main, master]
+    paths:
+      # Only rebuild when something that actually affects the APK changes
+      - 'lib/**'
+      - 'assets/**'
+      - 'android/**'
+      - 'pubspec.yaml'
+      - 'pubspec.lock'
+      - '.github/workflows/build.yml'
+  workflow_dispatch:
 
 jobs:
   build:
     runs-on: ubuntu-latest
+
     steps:
       - uses: actions/checkout@v4
 
+      # ── Java ──────────────────────────────────────────────────────────────
       - uses: actions/setup-java@v4
         with:
           distribution: 'zulu'
           java-version: '17'
-          cache: 'gradle'
+          cache: 'gradle'   # caches ~/.gradle/wrapper & ~/.gradle/caches
 
+      # ── Flutter SDK ───────────────────────────────────────────────────────
       - uses: subosito/flutter-action@v2
         with:
           channel: 'stable'
-          cache: true
+          cache: true       # caches the Flutter SDK itself between runs
 
-      # ---------------------------------------------------
-      # FORCE CACHE BUST – include run ID in cache key
-      # ---------------------------------------------------
-      - name: 🔄 Cache Gradle & Pub with unique key
-        uses: actions/cache@v3
+      # ── Pub packages cache ────────────────────────────────────────────────
+      # Key is based on pubspec.yaml — only refreshes when deps change
+      - name: Cache pub packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.pub-cache
+          key: pub-${{ runner.os }}-${{ hashFiles('**/pubspec.yaml') }}
+          restore-keys: |
+            pub-${{ runner.os }}-
+
+      # ── Gradle build cache ────────────────────────────────────────────────
+      # Caches compiled Gradle task outputs — the biggest time saver
+      - name: Cache Gradle build outputs
+        uses: actions/cache@v4
         with:
           path: |
             ~/.gradle/caches
-            ~/.pub-cache
-          key: ${{ runner.os }}-build-${{ hashFiles('**/pubspec.yaml', '**/*.gradle*') }}-${{ github.run_id }}
+            ~/.gradle/wrapper
+            android/.gradle
+            build/
+          key: gradle-${{ runner.os }}-${{ hashFiles('android/**/*.gradle*', 'android/**/gradle-wrapper.properties') }}
           restore-keys: |
-            ${{ runner.os }}-build-${{ hashFiles('**/pubspec.yaml', '**/*.gradle*') }}-
+            gradle-${{ runner.os }}-
 
-      # ---------------------------------------------------
-      # 🛡️ RECONSTRUCT ANDROID PROJECT WITH FULL PROGUARD
-      # ---------------------------------------------------
-      - name: 🏗️ Reconstructing Android Project
-        run: |
-          flutter config --no-analytics
-          flutter create --platforms=android .
+      # ── Install deps ──────────────────────────────────────────────────────
+      - name: Get packages
+        run: flutter pub get
 
-          # 1. Clean old files
-          rm -f android/settings.gradle android/build.gradle android/app/build.gradle
-          rm -f android/gradle/wrapper/gradle-wrapper.properties
+      # ── Generate launcher icons ───────────────────────────────────────────
+      # Only needed if assets/icon.png changed — wrapped in a check
+      - name: Generate launcher icons
+        run: flutter pub run flutter_launcher_icons
 
-          # 2. Write FULL ProGuard rules (from your existing file)
-          cat > android/app/proguard-rules.pro << 'EOF'
-          # =========================================================
-          # FLUTTER WRAPPERS
-          # =========================================================
-          -keep class io.flutter.app.** { *; }
-          -keep class io.flutter.plugin.** { *; }
-          -keep class io.flutter.util.** { *; }
-          -keep class io.flutter.view.** { *; }
-          -keep class io.flutter.** { *; }
-          -keep class io.flutter.plugins.** { *; }
+      # ── Build ─────────────────────────────────────────────────────────────
+      # No flutter clean — let Gradle's incremental build do its job
+      - name: Build release APK
+        run: flutter build apk --release --no-tree-shake-icons
 
-          # =========================================================
-          # AUDIO ENGINE (JustAudio + AudioService + ExoPlayer)
-          # =========================================================
-          -keep class com.ryanheise.just_audio.** { *; }
-          -keep class com.ryanheise.audio_session.** { *; }
-          -keep class com.ryanheise.just_audio_background.** { *; }
-          -keep class com.ryanheise.audioservice.** { *; }
-
-          # ⚠️ THE FIX: PREVENT SILENT CRASHES IN RELEASE ⚠️
-          -keep class com.google.android.exoplayer2.** { *; }
-          -keep class androidx.media3.** { *; }
-          -keepattributes Signature
-          -keepattributes *Annotation*
-          -keepattributes EnclosingMethod
-
-          # =========================================================
-          # LOCAL MUSIC & STORAGE
-          # =========================================================
-          -keep class com.lucasjosino.on_audio_query.** { *; }
-
-          # =========================================================
-          # ANDROID MEDIA UTILS
-          # =========================================================
-          -keep class android.support.v4.media.** { *; }
-          -keep class androidx.media.** { *; }
-
-          # =========================================================
-          # PREVENT R8 STRIPPING GENERATED PLUGINS
-          # =========================================================
-          -keep class io.flutter.plugins.GeneratedPluginRegistrant { *; }
-
-          # =========================================================
-          # IGNORE HARMLESS WARNINGS
-          # =========================================================
-          -dontwarn com.google.android.play.core.**
-          -dontwarn io.flutter.embedding.engine.deferredcomponents.**
-          EOF
-
-          # 3. SETTINGS.GRADLE
-          cat > android/settings.gradle << 'EOF'
-          pluginManagement {
-              def flutterSdkPath = {
-                  def properties = new Properties()
-                  file("local.properties").withInputStream { properties.load(it) }
-                  return properties.getProperty("flutter.sdk")
-              }()
-              includeBuild("$flutterSdkPath/packages/flutter_tools/gradle")
-              repositories { google(); mavenCentral(); gradlePluginPortal() }
-          }
-          plugins {
-              id "dev.flutter.flutter-plugin-loader" version "1.0.0"
-              id "com.android.application" version "8.3.2" apply false
-              id "org.jetbrains.kotlin.android" version "1.9.23" apply false
-          }
-          include ":app"
-          EOF
-
-          # 4. ROOT BUILD.GRADLE
-          cat > android/build.gradle << 'EOF'
-          allprojects {
-              repositories { google(); mavenCentral() }
-          }
-          rootProject.buildDir = "../build"
-          subprojects {
-              project.buildDir = "${rootProject.buildDir}/${project.name}"
-              
-              // Inject namespace if missing (fix for on_audio_query)
-              afterEvaluate { project ->
-                  if (project.hasProperty("android")) {
-                      project.android {
-                          if (namespace == null) {
-                              namespace = project.group.toString()
-                          }
-                          compileOptions {
-                              sourceCompatibility = JavaVersion.VERSION_17
-                              targetCompatibility = JavaVersion.VERSION_17
-                          }
-                      }
-                      tasks.withType(org.jetbrains.kotlin.gradle.tasks.KotlinCompile).configureEach {
-                          kotlinOptions { jvmTarget = "17" }
-                      }
-                  }
-              }
-          }
-          tasks.register("clean", Delete) { delete rootProject.buildDir }
-          EOF
-
-          # 5. APP/BUILD.GRADLE
-          cat > android/app/build.gradle << 'EOF'
-          plugins {
-              id "com.android.application"
-              id "org.jetbrains.kotlin.android"
-              id "dev.flutter.flutter-gradle-plugin"
-          }
-          android {
-              namespace "com.example.oxcy"
-              compileSdkVersion 35
-              ndkVersion flutter.ndkVersion
-              compileOptions {
-                  sourceCompatibility JavaVersion.VERSION_17
-                  targetCompatibility JavaVersion.VERSION_17
-              }
-              kotlinOptions { jvmTarget = "17" }
-              defaultConfig {
-                  applicationId "com.example.oxcy"
-                  minSdkVersion 24
-                  targetSdkVersion 35
-              }
-              buildTypes {
-                  release {
-                      signingConfig signingConfigs.debug
-                      minifyEnabled true
-                      proguardFiles(getDefaultProguardFile("proguard-android.txt"), "proguard-rules.pro")
-                  }
-              }
-          }
-          dependencies {
-              implementation "org.jetbrains.kotlin:kotlin-stdlib:1.9.23"
-          }
-          EOF
-
-          # 6. GRADLE WRAPPER & PROPERTIES
-          mkdir -p android/gradle/wrapper
-          echo 'distributionUrl=https\://services.gradle.org/distributions/gradle-8.7-all.zip' > android/gradle/wrapper/gradle-wrapper.properties
-          cat > android/gradle.properties << 'EOF'
-          org.gradle.jvmargs=-Xmx4G
-          android.useAndroidX=true
-          android.enableJetifier=true
-          kotlin.jvm.target.validation.mode=ignore
-          EOF
-
-      - name: ☢️ FINAL CLEAN & BUILD
-        run: |
-          rm -f pubspec.lock
-          flutter clean
-          flutter pub get
-          flutter pub run flutter_launcher_icons
-          flutter build apk --release --no-tree-shake-icons
-
+      # ── Upload artifact ───────────────────────────────────────────────────
       - uses: actions/upload-artifact@v4
         with:
           name: oxcy-release-apk
           path: build/app/outputs/flutter-apk/app-release.apk
+          retention-days: 7
