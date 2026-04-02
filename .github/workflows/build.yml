@@ -4,7 +4,6 @@ on:
   push:
     branches: [main, master]
     paths:
-      # Only rebuild when something that actually affects the APK changes
       - 'lib/**'
       - 'assets/**'
       - 'android/**'
@@ -25,27 +24,24 @@ jobs:
         with:
           distribution: 'zulu'
           java-version: '17'
-          cache: 'gradle'   # caches ~/.gradle/wrapper & ~/.gradle/caches
+          cache: 'gradle'
 
       # ── Flutter SDK ───────────────────────────────────────────────────────
       - uses: subosito/flutter-action@v2
         with:
           channel: 'stable'
-          cache: true       # caches the Flutter SDK itself between runs
+          cache: true
 
-      # ── Pub packages cache ────────────────────────────────────────────────
-      # Key is based on pubspec.yaml — only refreshes when deps change
+      # ── Pub cache ─────────────────────────────────────────────────────────
       - name: Cache pub packages
         uses: actions/cache@v4
         with:
           path: ~/.pub-cache
           key: pub-${{ runner.os }}-${{ hashFiles('**/pubspec.yaml') }}
-          restore-keys: |
-            pub-${{ runner.os }}-
+          restore-keys: pub-${{ runner.os }}-
 
-      # ── Gradle build cache ────────────────────────────────────────────────
-      # Caches compiled Gradle task outputs — the biggest time saver
-      - name: Cache Gradle build outputs
+      # ── Gradle cache ──────────────────────────────────────────────────────
+      - name: Cache Gradle
         uses: actions/cache@v4
         with:
           path: |
@@ -54,24 +50,46 @@ jobs:
             android/.gradle
             build/
           key: gradle-${{ runner.os }}-${{ hashFiles('android/**/*.gradle*', 'android/**/gradle-wrapper.properties') }}
-          restore-keys: |
-            gradle-${{ runner.os }}-
+          restore-keys: gradle-${{ runner.os }}-
+
+      # ── Fix: patch Gradle + Kotlin versions ───────────────────────────────
+      # Flutter 3.29+ uses filePermissions API (Gradle 8.3+).
+      # This fails to compile when Kotlin is 1.9.x targeting JVM 1.8.
+      # Fix: bump Gradle wrapper to 8.10.2 and Kotlin plugin to 2.0.21.
+      # This is a targeted patch — it does NOT regenerate the whole project.
+      - name: Patch Gradle & Kotlin versions
+        run: |
+          # 1. Gradle wrapper → 8.10.2
+          sed -i 's|distributionUrl=.*|distributionUrl=https\\://services.gradle.org/distributions/gradle-8.10.2-all.zip|' \
+            android/gradle/wrapper/gradle-wrapper.properties
+
+          # 2. Kotlin plugin in settings.gradle → 2.0.21
+          sed -i 's|id "org.jetbrains.kotlin.android" version "[^"]*"|id "org.jetbrains.kotlin.android" version "2.0.21"|g' \
+            android/settings.gradle
+
+          # 3. Kotlin stdlib dep in app/build.gradle(.kts) → 2.0.21
+          # Handles both Groovy and Kotlin DSL syntax
+          sed -i 's|kotlin-stdlib:[^"]*"|kotlin-stdlib:2.0.21"|g' android/app/build.gradle.kts 2>/dev/null || true
+          sed -i 's|kotlin-stdlib:[^"]*"|kotlin-stdlib:2.0.21"|g' android/app/build.gradle 2>/dev/null || true
+
+          echo "--- Patched gradle-wrapper.properties ---"
+          cat android/gradle/wrapper/gradle-wrapper.properties
+          echo "--- Patched settings.gradle (kotlin line) ---"
+          grep kotlin android/settings.gradle
 
       # ── Install deps ──────────────────────────────────────────────────────
       - name: Get packages
         run: flutter pub get
 
-      # ── Generate launcher icons ───────────────────────────────────────────
-      # Only needed if assets/icon.png changed — wrapped in a check
+      # ── Launcher icons ────────────────────────────────────────────────────
       - name: Generate launcher icons
         run: flutter pub run flutter_launcher_icons
 
       # ── Build ─────────────────────────────────────────────────────────────
-      # No flutter clean — let Gradle's incremental build do its job
       - name: Build release APK
         run: flutter build apk --release --no-tree-shake-icons
 
-      # ── Upload artifact ───────────────────────────────────────────────────
+      # ── Upload ────────────────────────────────────────────────────────────
       - uses: actions/upload-artifact@v4
         with:
           name: oxcy-release-apk
