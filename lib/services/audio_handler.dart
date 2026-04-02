@@ -1,10 +1,7 @@
-import 'package:flutter/services.dart';
 import 'package:audio_service/audio_service.dart';
 import 'package:audio_session/audio_session.dart';
 import 'package:just_audio/just_audio.dart';
-import 'package:youtube_explode_dart/youtube_explode_dart.dart';
 import 'package:rxdart/rxdart.dart';
-import '../utils/clients.dart';
 import 'dart:async';
 
 Future<AudioHandler> initAudioService() async {
@@ -23,16 +20,12 @@ Future<AudioHandler> initAudioService() async {
 
 class MyAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandler {
   final AudioPlayer _player = AudioPlayer();
-  final ConcatenatingAudioSource _playlist = ConcatenatingAudioSource(children: []);
-
-  late final YoutubeExplode _youtubeVr;
-  late final YoutubeExplode _youtubeAndroid;
+  final ConcatenatingAudioSource _playlist =
+      ConcatenatingAudioSource(children: []);
 
   final _mediaItemStreamController = BehaviorSubject<MediaItem?>.seeded(null);
 
   MyAudioHandler() {
-    _youtubeVr = YoutubeExplode(createAndroidVrClient());
-    _youtubeAndroid = YoutubeExplode(createAndroidClient());
     _init();
   }
 
@@ -48,44 +41,37 @@ class MyAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandler {
     });
   }
 
+  /// Builds an AudioSource from a MediaItem.
+  ///
+  /// - genre == 'jiosaavn': direct URL stored in extras['url']
+  /// - genre == 'local':    item.id is the file URI
   Future<AudioSource> _createAudioSource(MediaItem item) async {
-    if (item.genre == 'youtube') {
-      try {
-        var manifest = await _youtubeVr.videos.streamsClient.getManifest(item.id);
-        var url = manifest.audioOnly.withHighestBitrate().url;
-        return AudioSource.uri(url, tag: item);
-      } catch (e) {
-        print('VR client failed for ${item.id}, trying Android client...');
-        try {
-          var manifest = await _youtubeAndroid.videos.streamsClient.getManifest(item.id);
-          var url = manifest.audioOnly.withHighestBitrate().url;
-          return AudioSource.uri(url, tag: item);
-        } catch (e) {
-          print('Android client also failed for ${item.id}: $e');
-          throw Exception('Could not get stream URL for ${item.id}');
-        }
+    if (item.genre == 'jiosaavn') {
+      final url = item.extras?['url'] as String?;
+      if (url == null || url.isEmpty) {
+        throw Exception('No stream URL for JioSaavn song "${item.title}"');
       }
+      return AudioSource.uri(Uri.parse(url), tag: item);
     } else {
+      // Local file — id is the content URI
       return AudioSource.uri(Uri.parse(item.id), tag: item);
     }
   }
 
-  // FIX: Implement the setRepeatMode method
   @override
   Future<void> setRepeatMode(AudioServiceRepeatMode repeatMode) async {
     switch (repeatMode) {
       case AudioServiceRepeatMode.none:
-        _player.setLoopMode(LoopMode.off);
+        await _player.setLoopMode(LoopMode.off);
         break;
       case AudioServiceRepeatMode.one:
-        _player.setLoopMode(LoopMode.one);
+        await _player.setLoopMode(LoopMode.one);
         break;
       case AudioServiceRepeatMode.group:
       case AudioServiceRepeatMode.all:
-        _player.setLoopMode(LoopMode.all);
+        await _player.setLoopMode(LoopMode.all);
         break;
     }
-    // Broadcast the state change
     playbackState.add(playbackState.value.copyWith(repeatMode: repeatMode));
   }
 
@@ -96,19 +82,20 @@ class MyAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandler {
       await _playlist.add(source);
       queue.add(List.from(queue.value)..add(item));
     } catch (e) {
-      print("Error adding queue item: $e");
+      print('Error adding queue item: $e');
     }
   }
 
   @override
   Future<void> updateQueue(List<MediaItem> newQueue) async {
     try {
-      final audioSources = await Future.wait(newQueue.map(_createAudioSource));
+      final audioSources =
+          await Future.wait(newQueue.map(_createAudioSource));
       await _playlist.clear();
       await _playlist.addAll(audioSources);
       queue.add(newQueue);
     } catch (e) {
-      print("Error updating queue: $e");
+      print('Error updating queue: $e');
     }
   }
 
@@ -137,15 +124,16 @@ class MyAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandler {
   Future<void> stop() async {
     await _player.stop();
     _player.dispose();
-    _youtubeVr.close();
-    _youtubeAndroid.close();
     return super.stop();
   }
 
   PlaybackState _transformEvent(PlaybackEvent event) {
     return PlaybackState(
       controls: [
-        if (_player.hasPrevious) MediaControl.skipToPrevious else MediaControl.play,
+        if (_player.hasPrevious)
+          MediaControl.skipToPrevious
+        else
+          MediaControl.play,
         if (_player.playing) MediaControl.pause else MediaControl.play,
         if (_player.hasNext) MediaControl.skipToNext else MediaControl.play,
       ],
@@ -167,7 +155,6 @@ class MyAudioHandler extends BaseAudioHandler with QueueHandler, SeekHandler {
       bufferedPosition: _player.bufferedPosition,
       speed: _player.speed,
       queueIndex: event.currentIndex,
-      // FIX: Ensure repeatMode is included in the state
       repeatMode: const {
         LoopMode.off: AudioServiceRepeatMode.none,
         LoopMode.one: AudioServiceRepeatMode.one,
